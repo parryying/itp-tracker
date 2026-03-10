@@ -6,9 +6,15 @@ import {
   View,
   TouchableOpacity,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { palette } from '@/constants/Colors';
+import {
+  generateDoctorQuestions,
+  generateDailySummary,
+  DoctorQuestions,
+} from '@/services/azureOpenAIService';
 
 // Mock AI-generated doctor questions
 const MOCK_QUESTIONS = [
@@ -98,6 +104,75 @@ function PriorityBadge({ level }: { level: string }) {
 export default function ReportsScreen() {
   const [activeTab, setActiveTab] = React.useState<'questions' | 'summary' | 'history'>('questions');
   const [checkedQuestions, setCheckedQuestions] = React.useState<string[]>([]);
+  const [aiQuestions, setAiQuestions] = React.useState<DoctorQuestions | null>(null);
+  const [aiSummary, setAiSummary] = React.useState<string | null>(null);
+  const [loadingQuestions, setLoadingQuestions] = React.useState(false);
+  const [loadingSummary, setLoadingSummary] = React.useState(false);
+
+  // Patient data for AI context (will come from DB later)
+  const patientData = {
+    labs: [
+      { date: 'Mar 7', platelets: 28, mpv: 11.2, alt: 52, igg: 680 },
+      { date: 'Mar 4', platelets: 47, mpv: 10.8 },
+      { date: 'Feb 23', platelets: 52, alt: 35 },
+      { date: 'Feb 16', platelets: 58, alt: 22 },
+    ],
+    meds: [
+      { name: 'Prednisone', dose: '10mg', status: 'tapering', history: '20mg\u219215mg\u219210mg' },
+      { name: 'Eltrombopag', dose: '50mg', status: 'active', started: 'Feb 16' },
+      { name: 'Omeprazole', dose: '20mg', status: 'active' },
+    ],
+    symptoms: [
+      { date: 'Mar 9', bruises: 7, newBruises: 3, energy: 3, oralBlisters: 1 },
+      { date: 'Mar 8', bruises: 5, newBruises: 1, energy: 3, oralBlisters: 1 },
+    ],
+    bruiseAssessments: [
+      { date: 'Mar 9', totalBruises: 7, severity: 'moderate', regions: { left_leg: 3, right_arm: 2, left_arm: 1, torso: 1 } },
+    ],
+  };
+
+  const handleGenerateQuestions = async () => {
+    setLoadingQuestions(true);
+    try {
+      const result = await generateDoctorQuestions(
+        patientData.labs,
+        patientData.meds,
+        patientData.symptoms,
+        patientData.bruiseAssessments
+      );
+      setAiQuestions(result);
+    } catch (error) {
+      console.error('Failed to generate questions:', error);
+      Alert.alert('Error', 'Failed to generate questions. Using cached data.');
+    } finally {
+      setLoadingQuestions(false);
+    }
+  };
+
+  const handleGenerateSummary = async () => {
+    setLoadingSummary(true);
+    try {
+      const result = await generateDailySummary(
+        patientData.labs,
+        patientData.meds,
+        patientData.symptoms,
+        patientData.bruiseAssessments,
+        new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+      );
+      setAiSummary(result);
+    } catch (error) {
+      console.error('Failed to generate summary:', error);
+      Alert.alert('Error', 'Failed to generate summary. Using cached data.');
+    } finally {
+      setLoadingSummary(false);
+    }
+  };
+
+  // Use AI questions if available, otherwise fall back to mock
+  const displayQuestions = aiQuestions?.questions?.map((q, i) => ({
+    id: String(i + 1),
+    ...q,
+  })) || MOCK_QUESTIONS;
 
   const toggleQuestion = (id: string) => {
     setCheckedQuestions((prev) =>
@@ -128,7 +203,7 @@ export default function ReportsScreen() {
           >
             <Text style={[styles.tabText, activeTab === tab && styles.tabTextActive]}>
               {tab === 'questions'
-                ? `Questions (${MOCK_QUESTIONS.length})`
+                ? `Questions (${displayQuestions.length})`
                 : tab === 'summary'
                 ? 'AI Summary'
                 : 'History'}
@@ -150,7 +225,26 @@ export default function ReportsScreen() {
               </View>
             </View>
 
-            {MOCK_QUESTIONS.map((q) => (
+            {/* Generate button */}
+            {!aiQuestions && (
+              <TouchableOpacity
+                style={styles.generateBtn}
+                onPress={handleGenerateQuestions}
+                disabled={loadingQuestions}
+                activeOpacity={0.7}
+              >
+                {loadingQuestions ? (
+                  <ActivityIndicator size="small" color={palette.white} />
+                ) : (
+                  <Ionicons name="sparkles" size={18} color={palette.white} />
+                )}
+                <Text style={styles.generateBtnText}>
+                  {loadingQuestions ? 'Generating questions...' : 'Generate AI Questions'}
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            {displayQuestions.map((q) => (
               <TouchableOpacity
                 key={q.id}
                 style={[
@@ -205,33 +299,69 @@ export default function ReportsScreen() {
               <Ionicons name="sparkles" size={20} color={palette.purple} />
               <Text style={styles.sectionTitle}>AI Clinical Summary</Text>
             </View>
-            <Text style={styles.summaryDate}>Generated: March 9, 2026 at 3:45 PM</Text>
 
-            <View style={styles.summaryCard}>
-              {MOCK_AI_SUMMARY.split('\n').map((line, i) => {
-                if (line.startsWith('**') && line.endsWith('**')) {
-                  const text = line.replace(/\*\*/g, '');
-                  return (
-                    <Text key={i} style={styles.summaryHeading}>
-                      {text}
-                    </Text>
-                  );
-                }
-                if (line.startsWith('•')) {
-                  return (
-                    <Text key={i} style={styles.summaryBullet}>
-                      {line}
-                    </Text>
-                  );
-                }
-                if (line.trim() === '') return <View key={i} style={{ height: 8 }} />;
-                return (
-                  <Text key={i} style={styles.summaryText}>
-                    {line.replace(/\*\*/g, '')}
-                  </Text>
-                );
-              })}
-            </View>
+            {/* Generate button */}
+            {!aiSummary && (
+              <TouchableOpacity
+                style={styles.generateBtn}
+                onPress={handleGenerateSummary}
+                disabled={loadingSummary}
+                activeOpacity={0.7}
+              >
+                {loadingSummary ? (
+                  <ActivityIndicator size="small" color={palette.white} />
+                ) : (
+                  <Ionicons name="sparkles" size={18} color={palette.white} />
+                )}
+                <Text style={styles.generateBtnText}>
+                  {loadingSummary ? 'Generating summary...' : 'Generate AI Summary'}
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            {loadingSummary && (
+              <View style={styles.summaryCard}>
+                <ActivityIndicator size="large" color={palette.purple} />
+                <Text style={{ textAlign: 'center', color: palette.gray500, marginTop: 12 }}>
+                  Analyzing labs, meds, and symptoms...
+                </Text>
+              </View>
+            )}
+
+            {(aiSummary || (!loadingSummary && !aiSummary)) && (
+              <View>
+                <Text style={styles.summaryDate}>
+                  {aiSummary
+                    ? `Generated: ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`
+                    : 'Tap the button above to generate a fresh AI summary'}
+                </Text>
+                <View style={styles.summaryCard}>
+                  {(aiSummary || MOCK_AI_SUMMARY).split('\n').map((line, i) => {
+                    if (line.startsWith('**') && line.endsWith('**')) {
+                      const text = line.replace(/\*\*/g, '');
+                      return (
+                        <Text key={i} style={styles.summaryHeading}>
+                          {text}
+                        </Text>
+                      );
+                    }
+                    if (line.startsWith('•')) {
+                      return (
+                        <Text key={i} style={styles.summaryBullet}>
+                          {line}
+                        </Text>
+                      );
+                    }
+                    if (line.trim() === '') return <View key={i} style={{ height: 8 }} />;
+                    return (
+                      <Text key={i} style={styles.summaryText}>
+                        {line.replace(/\*\*/g, '')}
+                      </Text>
+                    );
+                  })}
+                </View>
+              </View>
+            )}
           </View>
         )}
 
@@ -443,4 +573,16 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   exportBtnText: { fontSize: 15, fontWeight: '600', color: palette.white },
+
+  generateBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: palette.purple,
+    paddingVertical: 14,
+    borderRadius: 12,
+    gap: 8,
+    marginBottom: 16,
+  },
+  generateBtnText: { fontSize: 15, fontWeight: '600', color: palette.white },
 });

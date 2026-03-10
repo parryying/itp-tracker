@@ -12,8 +12,10 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
 import { palette } from '@/constants/Colors';
 import { uploadPhoto, getSignedPhotoUrl } from '@/services/azureBlobService';
+import { analyzeBruisePhoto, BruiseAnalysis } from '@/services/azureOpenAIService';
 
 const BODY_REGIONS = [
   { id: 'left_arm', label: 'Left Arm', icon: 'body' },
@@ -49,6 +51,8 @@ export default function CheckinScreen() {
   const [step, setStep] = React.useState<Step>('photos');
   const [photos, setPhotos] = React.useState<Record<string, { localUri: string; blobPath: string | null }>>({});
   const [uploading, setUploading] = React.useState<string | null>(null);
+  const [analyzing, setAnalyzing] = React.useState<string | null>(null);
+  const [analyses, setAnalyses] = React.useState<Record<string, BruiseAnalysis>>({});
   const [symptoms, setSymptoms] = React.useState<string[]>([]);
   const [energy, setEnergy] = React.useState(3);
   const [notes, setNotes] = React.useState('');
@@ -88,6 +92,20 @@ export default function CheckinScreen() {
         ...p,
         [regionId]: { localUri, blobPath },
       }));
+      // After upload, run AI bruise analysis
+      setAnalyzing(regionId);
+      try {
+        const base64 = await FileSystem.readAsStringAsync(localUri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        const analysis = await analyzeBruisePhoto(base64, regionId);
+        setAnalyses((prev) => ({ ...prev, [regionId]: analysis }));
+      } catch (aiError) {
+        console.error('AI analysis failed:', aiError);
+        // Non-blocking — photo is still saved even if AI fails
+      } finally {
+        setAnalyzing(null);
+      }
     } catch (error) {
       console.error('Upload failed:', error);
       Alert.alert(
@@ -210,6 +228,74 @@ export default function CheckinScreen() {
                 );
               })}
             </View>
+
+            {/* AI Analysis Results */}
+            {analyzing && (
+              <View style={styles.aiAnalysisCard}>
+                <ActivityIndicator size="small" color={palette.purple} />
+                <Text style={styles.aiAnalyzingText}>
+                  AI is analyzing {analyzing.replace('_', ' ')} for bruises...
+                </Text>
+              </View>
+            )}
+
+            {Object.keys(analyses).length > 0 && (
+              <View style={styles.aiResultsCard}>
+                <View style={styles.aiResultsHeader}>
+                  <Ionicons name="sparkles" size={18} color={palette.purple} />
+                  <Text style={styles.aiResultsTitle}>AI Bruise Analysis</Text>
+                </View>
+                {Object.entries(analyses).map(([region, analysis]) => (
+                  <View key={region} style={styles.aiRegionResult}>
+                    <Text style={styles.aiRegionName}>
+                      {BODY_REGIONS.find((r) => r.id === region)?.label || region}
+                    </Text>
+                    <View style={styles.aiCountsRow}>
+                      <View style={styles.aiCountBadge}>
+                        <Text style={[styles.aiCountValue, { color: analysis.bruise_count > 0 ? palette.warning : palette.success }]}>
+                          {analysis.bruise_count}
+                        </Text>
+                        <Text style={styles.aiCountLabel}>Bruises</Text>
+                      </View>
+                      <View style={styles.aiCountBadge}>
+                        <Text style={[styles.aiCountValue, { color: analysis.petechiae_count > 0 ? palette.warning : palette.success }]}>
+                          {analysis.petechiae_count}
+                        </Text>
+                        <Text style={styles.aiCountLabel}>Petechiae</Text>
+                      </View>
+                      <View style={styles.aiCountBadge}>
+                        <Text style={[styles.aiCountValue, { color: analysis.blood_blisters > 0 ? palette.critical : palette.success }]}>
+                          {analysis.blood_blisters}
+                        </Text>
+                        <Text style={styles.aiCountLabel}>Blisters</Text>
+                      </View>
+                      <View style={[styles.aiSeverityBadge, {
+                        backgroundColor: analysis.severity === 'severe' ? palette.criticalLight
+                          : analysis.severity === 'moderate' ? palette.warningLight
+                          : palette.successLight,
+                      }]}>
+                        <Text style={[styles.aiSeverityText, {
+                          color: analysis.severity === 'severe' ? palette.critical
+                            : analysis.severity === 'moderate' ? palette.warning
+                            : palette.success,
+                        }]}>
+                          {analysis.severity}
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={styles.aiSummaryText}>{analysis.summary}</Text>
+                  </View>
+                ))}
+                {/* Totals */}
+                <View style={styles.aiTotalsRow}>
+                  <Text style={styles.aiTotalsLabel}>Total across all regions:</Text>
+                  <Text style={styles.aiTotalsValue}>
+                    {Object.values(analyses).reduce((sum, a) => sum + a.bruise_count, 0)} bruises,{' '}
+                    {Object.values(analyses).reduce((sum, a) => sum + a.petechiae_count, 0)} petechiae
+                  </Text>
+                </View>
+              </View>
+            )}
 
             {/* Comparison preview (mock) */}
             {Object.keys(photos).length > 0 && (
@@ -665,4 +751,108 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   submitBtnText: { fontSize: 15, color: palette.white, fontWeight: '600' },
+
+  // AI Analysis styles
+  aiAnalysisCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: palette.purpleLight,
+    borderRadius: 12,
+    padding: 14,
+    marginTop: 16,
+    gap: 10,
+  },
+  aiAnalyzingText: {
+    fontSize: 13,
+    color: palette.purple,
+    fontWeight: '500',
+    flex: 1,
+  },
+  aiResultsCard: {
+    backgroundColor: palette.white,
+    borderRadius: 16,
+    padding: 16,
+    marginTop: 16,
+    borderWidth: 1,
+    borderColor: palette.purple + '30',
+  },
+  aiResultsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+    gap: 6,
+  },
+  aiResultsTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: palette.purple,
+  },
+  aiRegionResult: {
+    paddingVertical: 10,
+    borderTopWidth: 1,
+    borderTopColor: palette.gray100,
+  },
+  aiRegionName: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: palette.gray600,
+    marginBottom: 6,
+  },
+  aiCountsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 6,
+  },
+  aiCountBadge: {
+    alignItems: 'center',
+    backgroundColor: palette.gray50,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  aiCountValue: {
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  aiCountLabel: {
+    fontSize: 9,
+    color: palette.gray500,
+    fontWeight: '500',
+  },
+  aiSeverityBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    marginLeft: 'auto',
+  },
+  aiSeverityText: {
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'capitalize',
+  },
+  aiSummaryText: {
+    fontSize: 13,
+    color: palette.gray600,
+    lineHeight: 18,
+  },
+  aiTotalsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: palette.gray100,
+    marginTop: 4,
+  },
+  aiTotalsLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: palette.gray500,
+  },
+  aiTotalsValue: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: palette.gray800,
+  },
 });

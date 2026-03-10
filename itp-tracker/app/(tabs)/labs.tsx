@@ -6,9 +6,11 @@ import {
   View,
   TouchableOpacity,
   Dimensions,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { palette } from '@/constants/Colors';
+import { interpretLabResults, LabInterpretation } from '@/services/azureOpenAIService';
 
 const { width } = Dimensions.get('window');
 
@@ -227,11 +229,48 @@ export default function LabsScreen() {
     'CBC with Differential'
   );
   const [syncStatus, setSyncStatus] = React.useState<'synced' | 'syncing' | 'error'>('synced');
+  const [aiInterpretation, setAiInterpretation] = React.useState<LabInterpretation | null>(null);
+  const [aiLoading, setAiLoading] = React.useState(false);
 
   const flagCount = MOCK_LABS[0].panels.reduce(
     (acc, panel) => acc + panel.items.filter((i) => i.status !== 'normal').length,
     0
   );
+
+  const runAiInterpretation = async () => {
+    setAiLoading(true);
+    try {
+      // Flatten lab data for the AI
+      const allLabs = MOCK_LABS.map((labSet) => ({
+        date: labSet.date,
+        panels: labSet.panels.map((p) => ({
+          name: p.name,
+          results: p.items.map((i) => ({
+            name: i.name,
+            value: i.value,
+            unit: i.unit,
+            referenceRange: i.ref,
+            status: i.status,
+          })),
+        })),
+      }));
+      const meds = [
+        { name: 'Prednisone', dose: '10mg', status: 'tapering', history: '20mg→15mg→10mg since Jan 5' },
+        { name: 'Eltrombopag', dose: '50mg', status: 'active', history: '25mg→50mg since Feb 16' },
+        { name: 'Omeprazole', dose: '20mg', status: 'active' },
+      ];
+      const symptoms = [
+        { date: 'Mar 9', bruises: 7, newBruises: 3, energy: 3, oralBlisters: 1 },
+        { date: 'Mar 8', bruises: 5, newBruises: 1, energy: 3, oralBlisters: 1 },
+      ];
+      const result = await interpretLabResults(allLabs, meds, symptoms);
+      setAiInterpretation(result);
+    } catch (error) {
+      console.error('AI interpretation failed:', error);
+    } finally {
+      setAiLoading(false);
+    }
+  };
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -267,20 +306,64 @@ export default function LabsScreen() {
       </View>
 
       {/* AI Interpretation Banner */}
-      <TouchableOpacity style={styles.aiCard} activeOpacity={0.8}>
+      <TouchableOpacity
+        style={styles.aiCard}
+        activeOpacity={0.8}
+        onPress={() => { if (!aiInterpretation && !aiLoading) runAiInterpretation(); }}
+      >
         <View style={styles.aiHeader}>
           <Ionicons name="sparkles" size={18} color={palette.purple} />
           <Text style={styles.aiTitle}>AI Lab Interpretation</Text>
-          <View style={styles.flagBadge}>
-            <Text style={styles.flagBadgeText}>{flagCount} flags</Text>
-          </View>
+          {aiLoading ? (
+            <ActivityIndicator size="small" color={palette.purple} />
+          ) : (
+            <View style={styles.flagBadge}>
+              <Text style={styles.flagBadgeText}>
+                {aiInterpretation ? `${aiInterpretation.flags.length} flags` : `${flagCount} flags`}
+              </Text>
+            </View>
+          )}
         </View>
-        <Text style={styles.aiText}>
-          Platelet count critically low at 28k (↓40% from 47k, 3 days ago). MPV elevated suggesting
-          compensatory thrombopoiesis. ALT rising — likely eltrombopag-related. IgG borderline low on
-          chronic steroids.
-        </Text>
-        <Text style={styles.aiLink}>View full analysis & questions →</Text>
+        {aiLoading ? (
+          <Text style={styles.aiText}>Analyzing labs with clinical reasoning...</Text>
+        ) : aiInterpretation ? (
+          <View>
+            <Text style={styles.aiText}>{aiInterpretation.interpretation}</Text>
+            {aiInterpretation.flags.length > 0 && (
+              <View style={{ marginTop: 10 }}>
+                {aiInterpretation.flags.map((flag, i) => (
+                  <View key={i} style={[styles.aiFlagRow, {
+                    backgroundColor: flag.severity === 'critical' ? palette.criticalLight
+                      : flag.severity === 'warning' ? palette.warningLight : palette.primaryLight,
+                  }]}>
+                    <Ionicons
+                      name={flag.severity === 'critical' ? 'alert-circle' : 'warning'}
+                      size={14}
+                      color={flag.severity === 'critical' ? palette.critical : palette.warning}
+                    />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.aiFlagTitle}>{flag.lab}: {flag.value}</Text>
+                      <Text style={styles.aiFlagExplain}>{flag.explanation}</Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
+            {aiInterpretation.urgent && aiInterpretation.urgent_message && (
+              <View style={styles.aiUrgentBanner}>
+                <Ionicons name="alert-circle" size={16} color={palette.critical} />
+                <Text style={styles.aiUrgentText}>{aiInterpretation.urgent_message}</Text>
+              </View>
+            )}
+          </View>
+        ) : (
+          <View>
+            <Text style={styles.aiText}>
+              Tap to generate AI clinical interpretation of your latest lab results.
+            </Text>
+            <Text style={styles.aiLink}>Analyze with AI →</Text>
+          </View>
+        )}
       </TouchableOpacity>
 
       {/* Platelet Chart */}
@@ -406,6 +489,26 @@ const styles = StyleSheet.create({
   flagBadgeText: { fontSize: 11, fontWeight: '600', color: palette.warning },
   aiText: { fontSize: 14, color: palette.gray700, lineHeight: 20 },
   aiLink: { fontSize: 13, color: palette.purple, fontWeight: '500', marginTop: 8 },
+  aiFlagRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    padding: 10,
+    borderRadius: 10,
+    marginBottom: 6,
+  },
+  aiFlagTitle: { fontSize: 13, fontWeight: '600', color: palette.gray800 },
+  aiFlagExplain: { fontSize: 12, color: palette.gray600, lineHeight: 17, marginTop: 2 },
+  aiUrgentBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: palette.criticalLight,
+    padding: 12,
+    borderRadius: 10,
+    marginTop: 10,
+    gap: 8,
+  },
+  aiUrgentText: { flex: 1, fontSize: 13, fontWeight: '600', color: palette.critical },
 
   chartContainer: {
     backgroundColor: palette.white,
