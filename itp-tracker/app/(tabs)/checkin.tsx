@@ -8,9 +8,12 @@ import {
   Image,
   TextInput,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
 import { palette } from '@/constants/Colors';
+import { uploadPhoto, getSignedPhotoUrl } from '@/services/azureBlobService';
 
 const BODY_REGIONS = [
   { id: 'left_arm', label: 'Left Arm', icon: 'body' },
@@ -40,9 +43,12 @@ const ENERGY_LEVELS = [
 
 type Step = 'photos' | 'symptoms' | 'notes' | 'review';
 
+const PATIENT_ID = 'patient-001'; // Will come from auth context later
+
 export default function CheckinScreen() {
   const [step, setStep] = React.useState<Step>('photos');
-  const [photos, setPhotos] = React.useState<Record<string, string | null>>({});
+  const [photos, setPhotos] = React.useState<Record<string, { localUri: string; blobPath: string | null }>>({});
+  const [uploading, setUploading] = React.useState<string | null>(null);
   const [symptoms, setSymptoms] = React.useState<string[]>([]);
   const [energy, setEnergy] = React.useState(3);
   const [notes, setNotes] = React.useState('');
@@ -51,19 +57,46 @@ export default function CheckinScreen() {
   const steps: Step[] = ['photos', 'symptoms', 'notes', 'review'];
   const stepIndex = steps.indexOf(step);
 
-  const handleTakePhoto = (regionId: string) => {
-    // In production, this would launch expo-image-picker
-    Alert.alert(
-      'Camera',
-      `This would open the camera to photograph: ${regionId}\n\nThe photo will be sent to AI for bruise detection and counting.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Simulate Photo',
-          onPress: () => setPhotos((p) => ({ ...p, [regionId]: 'captured' })),
-        },
-      ]
-    );
+  const handleTakePhoto = async (regionId: string) => {
+    // Request camera permission
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Needed', 'Camera access is required to take photos.');
+      return;
+    }
+
+    // Launch camera — photo is NOT saved to album
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ['images'],
+      quality: 0.8,
+      allowsEditing: false,
+      exif: true,
+    });
+
+    if (result.canceled || !result.assets?.[0]) return;
+
+    const localUri = result.assets[0].uri;
+
+    // Show photo immediately while uploading
+    setPhotos((p) => ({ ...p, [regionId]: { localUri, blobPath: null } }));
+    setUploading(regionId);
+
+    try {
+      // Upload to Azure Blob Storage (not to phone album)
+      const { blobPath } = await uploadPhoto(localUri, PATIENT_ID, regionId);
+      setPhotos((p) => ({
+        ...p,
+        [regionId]: { localUri, blobPath },
+      }));
+    } catch (error) {
+      console.error('Upload failed:', error);
+      Alert.alert(
+        'Upload Failed',
+        'Photo saved locally. It will be uploaded when connection is restored.',
+      );
+    } finally {
+      setUploading(null);
+    }
   };
 
   const toggleSymptom = (id: string) => {
@@ -125,35 +158,57 @@ export default function CheckinScreen() {
               Take photos of each body region. AI will detect and count bruises, petechiae, and blisters.
             </Text>
             <View style={styles.regionGrid}>
-              {BODY_REGIONS.map((region) => (
-                <TouchableOpacity
-                  key={region.id}
-                  style={[
-                    styles.regionCard,
-                    photos[region.id] && styles.regionCardDone,
-                  ]}
-                  onPress={() => handleTakePhoto(region.id)}
-                  activeOpacity={0.7}
-                >
-                  {photos[region.id] ? (
-                    <View style={styles.regionDone}>
-                      <Ionicons name="checkmark-circle" size={32} color={palette.success} />
-                    </View>
-                  ) : (
-                    <View style={styles.regionIcon}>
-                      <Ionicons name="camera-outline" size={28} color={palette.gray400} />
-                    </View>
-                  )}
-                  <Text
+              {BODY_REGIONS.map((region) => {
+                const photo = photos[region.id];
+                const isUploading = uploading === region.id;
+                return (
+                  <TouchableOpacity
+                    key={region.id}
                     style={[
-                      styles.regionLabel,
-                      photos[region.id] && styles.regionLabelDone,
+                      styles.regionCard,
+                      photo && styles.regionCardDone,
                     ]}
+                    onPress={() => handleTakePhoto(region.id)}
+                    activeOpacity={0.7}
+                    disabled={isUploading}
                   >
-                    {region.label}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+                    {photo ? (
+                      <View style={styles.regionDone}>
+                        <Image
+                          source={{ uri: photo.localUri }}
+                          style={styles.regionThumb}
+                        />
+                        {isUploading ? (
+                          <View style={styles.uploadingOverlay}>
+                            <ActivityIndicator size="small" color={palette.white} />
+                            <Text style={styles.uploadingText}>Uploading...</Text>
+                          </View>
+                        ) : photo.blobPath ? (
+                          <View style={styles.uploadedBadge}>
+                            <Ionicons name="cloud-done" size={14} color={palette.white} />
+                          </View>
+                        ) : (
+                          <View style={[styles.uploadedBadge, { backgroundColor: palette.warning }]}>
+                            <Ionicons name="cloud-offline" size={14} color={palette.white} />
+                          </View>
+                        )}
+                      </View>
+                    ) : (
+                      <View style={styles.regionIcon}>
+                        <Ionicons name="camera-outline" size={28} color={palette.gray400} />
+                      </View>
+                    )}
+                    <Text
+                      style={[
+                        styles.regionLabel,
+                        photo && styles.regionLabelDone,
+                      ]}
+                    >
+                      {region.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
             </View>
 
             {/* Comparison preview (mock) */}
@@ -297,6 +352,14 @@ export default function CheckinScreen() {
               <Text style={styles.reviewValue}>
                 {Object.keys(photos).length} of {BODY_REGIONS.length} regions captured
               </Text>
+              {Object.keys(photos).length > 0 && (
+                <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 6, gap: 6 }}>
+                  <Ionicons name="cloud-done" size={14} color={palette.success} />
+                  <Text style={{ fontSize: 12, color: palette.success }}>
+                    {Object.values(photos).filter((p) => p.blobPath).length} uploaded to Azure
+                  </Text>
+                </View>
+              )}
             </View>
             <View style={styles.reviewCard}>
               <Text style={styles.reviewSection}>Symptoms</Text>
@@ -430,7 +493,42 @@ const styles = StyleSheet.create({
     backgroundColor: palette.successLight,
   },
   regionIcon: { marginBottom: 8 },
-  regionDone: { marginBottom: 8 },
+  regionDone: { marginBottom: 8, position: 'relative' },
+  regionThumb: {
+    width: 80,
+    height: 80,
+    borderRadius: 12,
+  },
+  uploadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  uploadingText: {
+    color: palette.white,
+    fontSize: 10,
+    fontWeight: '600',
+    marginTop: 4,
+  },
+  uploadedBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    backgroundColor: palette.success,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: palette.white,
+  },
   regionLabel: { fontSize: 13, fontWeight: '600', color: palette.gray600 },
   regionLabelDone: { color: palette.success },
 
