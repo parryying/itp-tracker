@@ -15,6 +15,7 @@ import {
   generateDailySummary,
   DoctorQuestions,
 } from '@/services/azureOpenAIService';
+import { formatDate } from '@/services/storageService';
 
 // Mock AI-generated doctor questions
 const MOCK_QUESTIONS = [
@@ -65,7 +66,7 @@ const MOCK_QUESTIONS = [
   },
 ];
 
-const MOCK_AI_SUMMARY = `**Clinical Summary — March 9, 2026**
+const MOCK_AI_SUMMARY = `**Clinical Summary — ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}**
 
 Your son's ITP is showing signs of increased activity following the recent prednisone taper. Key observations:
 

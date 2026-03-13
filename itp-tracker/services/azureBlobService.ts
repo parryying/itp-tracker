@@ -13,8 +13,6 @@
  *   4. Add credentials to .env
  */
 
-import * as FileSystem from 'expo-file-system';
-
 // Configuration — loaded from environment or constants
 const CONFIG = {
   accountName: process.env.EXPO_PUBLIC_AZURE_STORAGE_ACCOUNT_NAME || 'itptrackerstorage',
@@ -72,10 +70,9 @@ export async function uploadPhoto(
   const uploadUrl = getBlobUrl(blobPath);
 
   try {
-    // Read the file as base64
-    const base64 = await FileSystem.readAsStringAsync(localUri, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
+    // Read the local file as a blob using fetch (works with file:// URIs)
+    const fileResponse = await fetch(localUri);
+    const fileBlob = await fileResponse.blob();
 
     // Upload to Azure Blob Storage via PUT with SAS token
     const response = await fetch(uploadUrl, {
@@ -85,7 +82,7 @@ export async function uploadPhoto(
         'Content-Type': 'image/jpeg',
         'x-ms-blob-content-type': 'image/jpeg',
       },
-      body: base64ToArrayBuffer(base64),
+      body: fileBlob,
     });
 
     if (!response.ok) {

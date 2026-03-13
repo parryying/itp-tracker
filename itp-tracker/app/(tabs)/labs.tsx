@@ -9,8 +9,18 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useRouter } from 'expo-router';
 import { palette } from '@/constants/Colors';
 import { interpretLabResults, LabInterpretation } from '@/services/azureOpenAIService';
+import {
+  getConnections,
+  getStoredLabResults,
+  syncAllLabs,
+  getLastSyncTime,
+  ProviderConnection,
+  LabResult,
+} from '@/services/healthProviderService';
+import { useFocusEffect } from '@react-navigation/native';
 
 const { width } = Dimensions.get('window');
 
@@ -225,23 +235,59 @@ function LabResultItem({
 }
 
 export default function LabsScreen() {
+  const router = useRouter();
   const [expandedPanel, setExpandedPanel] = React.useState<string | null>(
     'CBC with Differential'
   );
-  const [syncStatus, setSyncStatus] = React.useState<'synced' | 'syncing' | 'error'>('synced');
+  const [connections, setConnections] = React.useState<ProviderConnection[]>([]);
+  const [importedLabs, setImportedLabs] = React.useState<LabResult[]>([]);
+  const [lastSync, setLastSync] = React.useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = React.useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
   const [aiInterpretation, setAiInterpretation] = React.useState<LabInterpretation | null>(null);
   const [aiLoading, setAiLoading] = React.useState(false);
 
-  const flagCount = MOCK_LABS[0].panels.reduce(
+  // Load connections and imported labs when screen gains focus
+  useFocusEffect(
+    React.useCallback(() => {
+      loadLabData();
+    }, [])
+  );
+
+  const loadLabData = async () => {
+    const [conns, labs, sync] = await Promise.all([
+      getConnections(),
+      getStoredLabResults(),
+      getLastSyncTime(),
+    ]);
+    setConnections(conns);
+    setImportedLabs(labs);
+    setLastSync(sync);
+  };
+
+  const handleSync = async () => {
+    setSyncStatus('syncing');
+    try {
+      await syncAllLabs();
+      await loadLabData();
+      setSyncStatus('synced');
+    } catch {
+      setSyncStatus('error');
+    }
+  };
+
+  // Use imported labs if available, otherwise fall back to mock
+  const displayLabs = importedLabs.length > 0 ? importedLabs : MOCK_LABS;
+
+  const flagCount = displayLabs[0]?.panels.reduce(
     (acc, panel) => acc + panel.items.filter((i) => i.status !== 'normal').length,
     0
-  );
+  ) || 0;
 
   const runAiInterpretation = async () => {
     setAiLoading(true);
     try {
       // Flatten lab data for the AI
-      const allLabs = MOCK_LABS.map((labSet) => ({
+      const allLabs = displayLabs.map((labSet) => ({
         date: labSet.date,
         panels: labSet.panels.map((p) => ({
           name: p.name,
@@ -274,36 +320,52 @@ export default function LabsScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      {/* MyChart Sync Status */}
-      <View style={styles.syncCard}>
+      {/* Lab Source Connection */}
+      <TouchableOpacity
+        style={styles.syncCard}
+        onPress={() => router.push('/connect-labs')}
+        activeOpacity={0.7}
+      >
         <View style={styles.syncRow}>
           <View style={styles.syncIcon}>
             <Ionicons
-              name={syncStatus === 'synced' ? 'cloud-done' : 'cloud-upload'}
+              name={connections.length > 0 ? 'cloud-done' : 'add-circle'}
               size={20}
-              color={syncStatus === 'synced' ? palette.success : palette.primary}
+              color={connections.length > 0 ? palette.success : palette.primary}
             />
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={styles.syncTitle}>MyChart Connected</Text>
-            <Text style={styles.syncSub}>Last synced: 2 hours ago</Text>
+            <Text style={styles.syncTitle}>
+              {connections.length > 0
+                ? `${connections.map(c => c.providerName).join(', ')}`
+                : 'Connect Lab Providers'}
+            </Text>
+            <Text style={styles.syncSub}>
+              {connections.length > 0
+                ? `Last synced: ${lastSync ? new Date(lastSync).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'never'}`
+                : 'Import from MyChart, LabCorp, Quest, and more'}
+            </Text>
           </View>
-          <TouchableOpacity
-            style={styles.syncBtn}
-            onPress={() => {
-              setSyncStatus('syncing');
-              setTimeout(() => setSyncStatus('synced'), 2000);
-            }}
-          >
-            <Ionicons
-              name="refresh"
-              size={16}
-              color={palette.primary}
-            />
-            <Text style={styles.syncBtnText}>Sync</Text>
-          </TouchableOpacity>
+          {connections.length > 0 ? (
+            <TouchableOpacity
+              style={styles.syncBtn}
+              onPress={(e) => { e.stopPropagation(); handleSync(); }}
+              disabled={syncStatus === 'syncing'}
+            >
+              {syncStatus === 'syncing' ? (
+                <ActivityIndicator size="small" color={palette.primary} />
+              ) : (
+                <>
+                  <Ionicons name="refresh" size={16} color={palette.primary} />
+                  <Text style={styles.syncBtnText}>Sync</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          ) : (
+            <Ionicons name="chevron-forward" size={20} color={palette.gray300} />
+          )}
         </View>
-      </View>
+      </TouchableOpacity>
 
       {/* AI Interpretation Banner */}
       <TouchableOpacity
@@ -370,7 +432,7 @@ export default function LabsScreen() {
       <PlateletChart />
 
       {/* Lab Results by Date */}
-      {MOCK_LABS.map((labSet, labIdx) => (
+      {displayLabs.map((labSet, labIdx) => (
         <View key={labIdx}>
           <View style={styles.dateHeader}>
             <Text style={styles.dateText}>{labSet.date}</Text>
@@ -378,6 +440,9 @@ export default function LabsScreen() {
               <View style={styles.newBadge}>
                 <Text style={styles.newBadgeText}>NEW</Text>
               </View>
+            )}
+            {(labSet as any).source && (
+              <Text style={{ fontSize: 11, color: palette.gray400, marginLeft: 8 }}>{(labSet as any).source}</Text>
             )}
           </View>
 

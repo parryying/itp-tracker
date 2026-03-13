@@ -6,16 +6,29 @@ import {
   View,
   TouchableOpacity,
   Dimensions,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { palette } from '@/constants/Colors';
+import {
+  DailyDose,
+  getDailyDoses,
+  saveDailyDoses,
+  formatDate,
+  getCheckin,
+  todayKey,
+  initCloudSync,
+  isSyncEnabled,
+  pullAllFromCloud,
+  pushAllToCloud,
+} from '@/services/storageService';
+import { useFocusEffect } from '@react-navigation/native';
 
 const { width } = Dimensions.get('window');
 
-// Mock data — will be replaced with real data from DB
+// Mock data for things we don't persist yet (labs, AI)
 const MOCK = {
-  date: 'March 9, 2026',
   plateletCount: 28,
   plateletTrend: 'down',
   plateletPrev: 47,
@@ -23,11 +36,6 @@ const MOCK = {
   bruisePrev: 4,
   newBruises: 3,
   healingBruises: 1,
-  medsToday: [
-    { name: 'Prednisone', dose: '10mg', taken: true },
-    { name: 'Eltrombopag', dose: '50mg', taken: false },
-    { name: 'Omeprazole', dose: '20mg', taken: true },
-  ],
   lastLabDate: '2 days ago',
   aiSummarySnippet:
     'Platelets dropped to 28k — likely related to prednisone taper. 3 new bruises detected. ALT trending up.',
@@ -134,15 +142,74 @@ function PlateletSparkline() {
 
 export default function DashboardScreen() {
   const router = useRouter();
-  const [meds, setMeds] = React.useState(MOCK.medsToday);
+  const [doses, setDoses] = React.useState<DailyDose[]>([]);
+  const [todayDate, setTodayDate] = React.useState(formatDate());
+  const [hasCheckin, setHasCheckin] = React.useState(false);
+  const [cloudSync, setCloudSync] = React.useState<'off' | 'syncing' | 'synced' | 'error'>('off');
 
-  const toggleMed = (index: number) => {
-    setMeds((prev) =>
-      prev.map((m, i) => (i === index ? { ...m, taken: !m.taken } : m))
-    );
+  // Load data from storage when screen gains focus
+  useFocusEffect(
+    React.useCallback(() => {
+      loadData();
+    }, [])
+  );
+
+  // Initialize cloud sync on first load
+  React.useEffect(() => {
+    (async () => {
+      const available = await initCloudSync();
+      if (available) {
+        setCloudSync('syncing');
+        try {
+          await pullAllFromCloud();
+          setCloudSync('synced');
+          await loadData(); // reload with cloud data
+        } catch {
+          setCloudSync('error');
+        }
+      }
+    })();
+  }, []);
+
+  const handleSync = async () => {
+    setCloudSync('syncing');
+    try {
+      await pushAllToCloud();
+      await pullAllFromCloud();
+      setCloudSync('synced');
+      await loadData();
+    } catch {
+      setCloudSync('error');
+    }
   };
 
-  const medsTaken = meds.filter((m) => m.taken).length;
+  const loadData = async () => {
+    const [dailyDoses, checkin] = await Promise.all([
+      getDailyDoses(),
+      getCheckin(),
+    ]);
+    setDoses(dailyDoses);
+    setTodayDate(formatDate());
+    setHasCheckin(!!checkin);
+  };
+
+  const toggleMed = async (index: number) => {
+    const updated = doses.map((d, i) =>
+      i === index
+        ? {
+            ...d,
+            taken: !d.taken,
+            takenAt: !d.taken
+              ? new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+              : null,
+          }
+        : d
+    );
+    setDoses(updated);
+    await saveDailyDoses(updated);
+  };
+
+  const medsTaken = doses.filter((m) => m.taken).length;
   const status = MOCK.plateletCount < 30 ? 'critical' : MOCK.plateletCount < 50 ? 'warning' : 'good';
 
   return (
@@ -151,9 +218,33 @@ export default function DashboardScreen() {
       <View style={styles.header}>
         <View>
           <Text style={styles.greeting}>ITP Tracker</Text>
-          <Text style={styles.date}>{MOCK.date}</Text>
+          <Text style={styles.date}>{todayDate}</Text>
         </View>
-        <StatusBadge level={status} />
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          {cloudSync !== 'off' && (
+            <TouchableOpacity
+              onPress={handleSync}
+              style={[styles.syncBtn, {
+                backgroundColor:
+                  cloudSync === 'synced' ? palette.successLight
+                  : cloudSync === 'error' ? palette.criticalLight
+                  : palette.primaryLight,
+              }]}
+              disabled={cloudSync === 'syncing'}
+            >
+              {cloudSync === 'syncing' ? (
+                <ActivityIndicator size="small" color={palette.primary} />
+              ) : (
+                <Ionicons
+                  name={cloudSync === 'synced' ? 'cloud-done' : cloudSync === 'error' ? 'cloud-offline' : 'cloud'}
+                  size={18}
+                  color={cloudSync === 'synced' ? palette.success : cloudSync === 'error' ? palette.critical : palette.primary}
+                />
+              )}
+            </TouchableOpacity>
+          )}
+          <StatusBadge level={status} />
+        </View>
       </View>
 
       {/* Quick Stats */}
@@ -214,7 +305,7 @@ export default function DashboardScreen() {
         <View style={styles.cardHeader}>
           <Text style={styles.cardTitle}>Medications Today</Text>
           <Text style={styles.medProgress}>
-            {medsTaken}/{meds.length}
+            {medsTaken}/{doses.length}
           </Text>
         </View>
         {/* Progress bar */}
@@ -222,14 +313,14 @@ export default function DashboardScreen() {
           <View
             style={[
               styles.progressFill,
-              { width: `${(medsTaken / meds.length) * 100}%` },
+              { width: `${doses.length > 0 ? (medsTaken / doses.length) * 100 : 0}%` },
             ]}
           />
         </View>
-        {meds.map((med, i) => (
+        {doses.map((med, i) => (
           <MedCheckItem
-            key={i}
-            name={med.name}
+            key={med.medId}
+            name={med.medName}
             dose={med.dose}
             taken={med.taken}
             onToggle={() => toggleMed(i)}
@@ -278,6 +369,13 @@ const styles = StyleSheet.create({
   },
   greeting: { fontSize: 26, fontWeight: '700', color: palette.gray800 },
   date: { fontSize: 14, color: palette.gray500, marginTop: 2 },
+  syncBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   badge: {
     flexDirection: 'row',
     alignItems: 'center',

@@ -12,10 +12,18 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system';
 import { palette } from '@/constants/Colors';
 import { uploadPhoto, getSignedPhotoUrl } from '@/services/azureBlobService';
 import { analyzeBruisePhoto, BruiseAnalysis } from '@/services/azureOpenAIService';
+import {
+  CheckinData,
+  getCheckin,
+  saveCheckin,
+  getCheckinHistory,
+  todayKey,
+  formatDate,
+  formatShortDate,
+} from '@/services/storageService';
 
 const BODY_REGIONS = [
   { id: 'left_arm', label: 'Left Arm', icon: 'body' },
@@ -44,10 +52,19 @@ const ENERGY_LEVELS = [
 ];
 
 type Step = 'photos' | 'symptoms' | 'notes' | 'review';
+type ScreenMode = 'history' | 'wizard' | 'view';
 
 const PATIENT_ID = 'patient-001'; // Will come from auth context later
 
 export default function CheckinScreen() {
+  // ─── Screen mode: history list vs wizard vs read-only view ──────────
+  const [mode, setMode] = React.useState<ScreenMode>('history');
+  const [historyDates, setHistoryDates] = React.useState<string[]>([]);
+  const [historyCheckins, setHistoryCheckins] = React.useState<Record<string, CheckinData>>({});
+  const [viewingDate, setViewingDate] = React.useState<string | null>(null);
+  const [historyLoaded, setHistoryLoaded] = React.useState(false);
+
+  // ─── Wizard state ───────────────────────────────────────────────────
   const [step, setStep] = React.useState<Step>('photos');
   const [photos, setPhotos] = React.useState<Record<string, { localUri: string; blobPath: string | null }>>({});
   const [uploading, setUploading] = React.useState<string | null>(null);
@@ -57,9 +74,79 @@ export default function CheckinScreen() {
   const [energy, setEnergy] = React.useState(3);
   const [notes, setNotes] = React.useState('');
   const [activities, setActivities] = React.useState('');
+  const [loaded, setLoaded] = React.useState(false);
 
   const steps: Step[] = ['photos', 'symptoms', 'notes', 'review'];
   const stepIndex = steps.indexOf(step);
+
+  // ─── Load history on mount ─────────────────────────────────────────
+  React.useEffect(() => {
+    loadHistory();
+  }, []);
+
+  const loadHistory = async () => {
+    const dates = await getCheckinHistory();
+    setHistoryDates(dates);
+    // Load summaries for each check-in
+    const checkins: Record<string, CheckinData> = {};
+    for (const d of dates.slice(0, 30)) { // load last 30
+      const c = await getCheckin(d);
+      if (c) checkins[d] = c;
+    }
+    setHistoryCheckins(checkins);
+    setHistoryLoaded(true);
+  };
+
+  // ─── Start / resume wizard ─────────────────────────────────────────
+  const startOrResumeCheckin = async () => {
+    const existing = await getCheckin();
+    if (existing) {
+      setPhotos(existing.photos || {});
+      setAnalyses(existing.analyses || {});
+      setSymptoms(existing.symptoms || []);
+      setEnergy(existing.energy || 3);
+      setNotes(existing.notes || '');
+      setActivities(existing.activities || '');
+    } else {
+      setPhotos({});
+      setAnalyses({});
+      setSymptoms([]);
+      setEnergy(3);
+      setNotes('');
+      setActivities('');
+    }
+    setStep('photos');
+    setLoaded(true);
+    setMode('wizard');
+  };
+
+  // ─── View a past check-in ──────────────────────────────────────────
+  const viewCheckin = (date: string) => {
+    setViewingDate(date);
+    setMode('view');
+  };
+
+  const goBackToHistory = async () => {
+    setMode('history');
+    setViewingDate(null);
+    await loadHistory(); // refresh in case we just saved
+  };
+
+  // Auto-save partial progress so data isn't lost
+  const autoSave = async (overrides?: Partial<CheckinData>) => {
+    const checkin: CheckinData = {
+      date: todayKey(),
+      photos,
+      analyses,
+      symptoms,
+      energy,
+      activities,
+      notes,
+      savedAt: new Date().toISOString(),
+      ...overrides,
+    };
+    await saveCheckin(checkin);
+  };
 
   const handleTakePhoto = async (regionId: string) => {
     // Request camera permission
@@ -95,8 +182,18 @@ export default function CheckinScreen() {
       // After upload, run AI bruise analysis
       setAnalyzing(regionId);
       try {
-        const base64 = await FileSystem.readAsStringAsync(localUri, {
-          encoding: FileSystem.EncodingType.Base64,
+        // Read local file as blob, then convert to base64 for AI vision API
+        const fileResp = await fetch(localUri);
+        const blob = await fileResp.blob();
+        const reader = new FileReader();
+        const base64: string = await new Promise((resolve, reject) => {
+          reader.onloadend = () => {
+            const dataUrl = reader.result as string;
+            // Strip data:image/jpeg;base64, prefix
+            resolve(dataUrl.split(',')[1] || dataUrl);
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
         });
         const analysis = await analyzeBruisePhoto(base64, regionId);
         setAnalyses((prev) => ({ ...prev, [regionId]: analysis }));
@@ -118,21 +215,286 @@ export default function CheckinScreen() {
   };
 
   const toggleSymptom = (id: string) => {
-    setSymptoms((prev) =>
-      prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]
-    );
+    setSymptoms((prev) => {
+      const updated = prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id];
+      autoSave({ symptoms: updated });
+      return updated;
+    });
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
+    const checkin: CheckinData = {
+      date: todayKey(),
+      photos,
+      analyses,
+      symptoms,
+      energy,
+      activities,
+      notes,
+      savedAt: new Date().toISOString(),
+    };
+    await saveCheckin(checkin);
     Alert.alert(
       'Check-in Saved',
-      'Your daily check-in has been saved. AI analysis will be generated shortly.',
-      [{ text: 'OK' }]
+      `Your check-in for ${formatDate()} has been saved. It will persist even if you close the app.`,
+      [{ text: 'OK', onPress: goBackToHistory }]
     );
   };
 
+  // ─── Helper: format a YYYY-MM-DD date string for display ───────────
+  const displayDate = (dateStr: string) => {
+    const parts = dateStr.split('-');
+    const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+    return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+  };
+
+  const isToday = (dateStr: string) => dateStr === todayKey();
+
+  // ─── HISTORY MODE ──────────────────────────────────────────────────
+  if (mode === 'history') {
+    const todayCheckin = historyCheckins[todayKey()];
+    return (
+      <View style={styles.container}>
+        <ScrollView style={styles.scrollArea} contentContainerStyle={styles.scrollContent}>
+          {/* Header */}
+          <Text style={styles.historyTitle}>Check-ins</Text>
+          <Text style={styles.historySubtitle}>{formatDate()}</Text>
+
+          {/* Today Card */}
+          <TouchableOpacity
+            style={styles.todayCard}
+            onPress={startOrResumeCheckin}
+            activeOpacity={0.7}
+          >
+            <View style={styles.todayCardLeft}>
+              <View style={[styles.todayBadge, todayCheckin ? styles.todayBadgeDone : null]}>
+                <Ionicons
+                  name={todayCheckin ? 'checkmark-circle' : 'add-circle'}
+                  size={28}
+                  color={todayCheckin ? palette.success : palette.primary}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.todayLabel}>
+                  {todayCheckin ? "Today's Check-in" : 'Start Today\'s Check-in'}
+                </Text>
+                {todayCheckin ? (
+                  <Text style={styles.todayMeta}>
+                    {Object.keys(todayCheckin.photos || {}).length} photos · {(todayCheckin.symptoms || []).length} symptoms · Energy {ENERGY_LEVELS.find(e => e.value === todayCheckin.energy)?.emoji || '😐'}
+                  </Text>
+                ) : (
+                  <Text style={styles.todayMeta}>
+                    Take photos, log symptoms, and track your day
+                  </Text>
+                )}
+              </View>
+            </View>
+            <Ionicons
+              name={todayCheckin ? 'create-outline' : 'arrow-forward'}
+              size={22}
+              color={todayCheckin ? palette.primary : palette.gray400}
+            />
+          </TouchableOpacity>
+
+          {/* History */}
+          {historyDates.length > 0 && (
+            <View style={styles.historySection}>
+              <Text style={styles.historySectionTitle}>Past Check-ins</Text>
+              {historyDates.map((dateStr) => {
+                const c = historyCheckins[dateStr];
+                if (!c || isToday(dateStr)) return null;
+                const photoCount = Object.keys(c.photos || {}).length;
+                const symptomCount = (c.symptoms || []).length;
+                const energyEmoji = ENERGY_LEVELS.find(e => e.value === c.energy)?.emoji || '😐';
+                return (
+                  <TouchableOpacity
+                    key={dateStr}
+                    style={styles.historyCard}
+                    onPress={() => viewCheckin(dateStr)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.historyCardDate}>
+                      <Text style={styles.historyCardDay}>
+                        {new Date(dateStr + 'T12:00:00').getDate()}
+                      </Text>
+                      <Text style={styles.historyCardMonth}>
+                        {new Date(dateStr + 'T12:00:00').toLocaleDateString('en-US', { month: 'short' })}
+                      </Text>
+                    </View>
+                    <View style={styles.historyCardBody}>
+                      <Text style={styles.historyCardTitle}>{displayDate(dateStr)}</Text>
+                      <View style={styles.historyCardStats}>
+                        {photoCount > 0 && (
+                          <View style={styles.historyStatBadge}>
+                            <Ionicons name="camera" size={12} color={palette.primary} />
+                            <Text style={styles.historyStatText}>{photoCount}</Text>
+                          </View>
+                        )}
+                        {symptomCount > 0 && (
+                          <View style={[styles.historyStatBadge, { backgroundColor: palette.warningLight }]}>
+                            <Ionicons name="medkit" size={12} color={palette.warning} />
+                            <Text style={[styles.historyStatText, { color: palette.warning }]}>{symptomCount}</Text>
+                          </View>
+                        )}
+                        <Text style={styles.historyEnergyEmoji}>{energyEmoji}</Text>
+                      </View>
+                      {(c.notes || c.activities) ? (
+                        <Text style={styles.historyCardNote} numberOfLines={1}>
+                          {c.activities || c.notes}
+                        </Text>
+                      ) : null}
+                    </View>
+                    <Ionicons name="chevron-forward" size={18} color={palette.gray300} />
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
+
+          {historyDates.filter(d => !isToday(d)).length === 0 && historyLoaded && (
+            <View style={styles.emptyHistory}>
+              <Ionicons name="calendar-outline" size={48} color={palette.gray300} />
+              <Text style={styles.emptyHistoryText}>No past check-ins yet</Text>
+              <Text style={styles.emptyHistorySubtext}>
+                Complete your first check-in to start tracking
+              </Text>
+            </View>
+          )}
+        </ScrollView>
+      </View>
+    );
+  }
+
+  // ─── VIEW MODE (read-only past check-in) ────────────────────────────
+  if (mode === 'view' && viewingDate) {
+    const c = historyCheckins[viewingDate];
+    if (!c) {
+      setMode('history');
+      return null;
+    }
+    return (
+      <View style={styles.container}>
+        {/* Header with back button */}
+        <View style={styles.viewHeader}>
+          <TouchableOpacity onPress={goBackToHistory} style={styles.viewBackBtn}>
+            <Ionicons name="arrow-back" size={22} color={palette.primary} />
+            <Text style={styles.viewBackText}>Check-ins</Text>
+          </TouchableOpacity>
+          <Text style={styles.viewDateTitle}>{displayDate(viewingDate)}</Text>
+        </View>
+
+        <ScrollView style={styles.scrollArea} contentContainerStyle={styles.scrollContent}>
+          {/* Photos */}
+          {Object.keys(c.photos || {}).length > 0 && (
+            <View style={styles.viewSection}>
+              <Text style={styles.viewSectionTitle}>📸 Photos</Text>
+              <View style={styles.viewPhotoGrid}>
+                {Object.entries(c.photos).map(([region, photo]) => (
+                  <View key={region} style={styles.viewPhotoItem}>
+                    <Image source={{ uri: photo.localUri }} style={styles.viewPhotoThumb} />
+                    <Text style={styles.viewPhotoLabel}>
+                      {BODY_REGIONS.find(r => r.id === region)?.label || region}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {/* AI Analysis */}
+          {Object.keys(c.analyses || {}).length > 0 && (
+            <View style={styles.viewSection}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 12 }}>
+                <Ionicons name="sparkles" size={16} color={palette.purple} />
+                <Text style={[styles.viewSectionTitle, { marginBottom: 0, color: palette.purple }]}>AI Analysis</Text>
+              </View>
+              {Object.entries(c.analyses).map(([region, analysis]: [string, any]) => (
+                <View key={region} style={styles.viewAnalysisItem}>
+                  <Text style={styles.viewAnalysisRegion}>
+                    {BODY_REGIONS.find(r => r.id === region)?.label || region}
+                  </Text>
+                  <View style={{ flexDirection: 'row', gap: 12, marginTop: 4 }}>
+                    <Text style={{ fontSize: 13, color: palette.gray600 }}>
+                      Bruises: <Text style={{ fontWeight: '700', color: analysis.bruise_count > 0 ? palette.warning : palette.success }}>{analysis.bruise_count}</Text>
+                    </Text>
+                    <Text style={{ fontSize: 13, color: palette.gray600 }}>
+                      Petechiae: <Text style={{ fontWeight: '700', color: analysis.petechiae_count > 0 ? palette.warning : palette.success }}>{analysis.petechiae_count}</Text>
+                    </Text>
+                    <Text style={{ fontSize: 13, color: palette.gray600 }}>
+                      Severity: <Text style={{ fontWeight: '700' }}>{analysis.severity}</Text>
+                    </Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          )}
+
+          {/* Symptoms */}
+          <View style={styles.viewSection}>
+            <Text style={styles.viewSectionTitle}>🩺 Symptoms</Text>
+            {(c.symptoms || []).length > 0 ? (
+              c.symptoms.map((s) => (
+                <View key={s} style={styles.viewSymptomItem}>
+                  <Ionicons name="checkmark-circle" size={18} color={palette.primary} />
+                  <Text style={styles.viewSymptomText}>
+                    {SYMPTOM_OPTIONS.find(o => o.id === s)?.label || s}
+                  </Text>
+                </View>
+              ))
+            ) : (
+              <Text style={styles.viewEmptyText}>No symptoms reported</Text>
+            )}
+          </View>
+
+          {/* Energy */}
+          <View style={styles.viewSection}>
+            <Text style={styles.viewSectionTitle}>⚡ Energy Level</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={{ fontSize: 32 }}>{ENERGY_LEVELS.find(e => e.value === c.energy)?.emoji || '😐'}</Text>
+              <Text style={{ fontSize: 16, fontWeight: '600', color: palette.gray700 }}>
+                {ENERGY_LEVELS.find(e => e.value === c.energy)?.label || 'Okay'}
+              </Text>
+            </View>
+          </View>
+
+          {/* Activities */}
+          {c.activities ? (
+            <View style={styles.viewSection}>
+              <Text style={styles.viewSectionTitle}>🏃 Activities</Text>
+              <Text style={styles.viewNoteText}>{c.activities}</Text>
+            </View>
+          ) : null}
+
+          {/* Notes */}
+          {c.notes ? (
+            <View style={styles.viewSection}>
+              <Text style={styles.viewSectionTitle}>📝 Notes</Text>
+              <Text style={styles.viewNoteText}>{c.notes}</Text>
+            </View>
+          ) : null}
+
+          {/* Saved timestamp */}
+          <Text style={styles.viewSavedAt}>
+            Saved at {new Date(c.savedAt).toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric' })}
+          </Text>
+        </ScrollView>
+      </View>
+    );
+  }
+
+  // ─── WIZARD MODE ────────────────────────────────────────────────────
   return (
     <View style={styles.container}>
+      {/* Wizard top bar with back to history */}
+      <View style={styles.wizardTopBar}>
+        <TouchableOpacity onPress={goBackToHistory} style={styles.wizardBackBtn}>
+          <Ionicons name="arrow-back" size={20} color={palette.primary} />
+          <Text style={styles.wizardBackText}>History</Text>
+        </TouchableOpacity>
+        <Text style={styles.wizardTopTitle}>Today's Check-in</Text>
+        <View style={{ width: 70 }} />
+      </View>
+
       {/* Progress Bar */}
       <View style={styles.progressContainer}>
         {steps.map((s, i) => (
@@ -487,7 +849,7 @@ export default function CheckinScreen() {
         {stepIndex > 0 && (
           <TouchableOpacity
             style={styles.backBtn}
-            onPress={() => setStep(steps[stepIndex - 1])}
+            onPress={() => { autoSave(); setStep(steps[stepIndex - 1]); }}
           >
             <Ionicons name="arrow-back" size={20} color={palette.primary} />
             <Text style={styles.backBtnText}>Back</Text>
@@ -497,7 +859,7 @@ export default function CheckinScreen() {
         {stepIndex < steps.length - 1 ? (
           <TouchableOpacity
             style={styles.nextBtn}
-            onPress={() => setStep(steps[stepIndex + 1])}
+            onPress={() => { autoSave(); setStep(steps[stepIndex + 1]); }}
           >
             <Text style={styles.nextBtnText}>Next</Text>
             <Ionicons name="arrow-forward" size={20} color={palette.white} />
@@ -518,6 +880,133 @@ const styles = StyleSheet.create({
   scrollArea: { flex: 1 },
   scrollContent: { padding: 16, paddingBottom: 32 },
 
+  // ─── History Mode ──────────────────────────────────────────────────
+  historyTitle: { fontSize: 28, fontWeight: '800', color: palette.gray800, marginBottom: 4 },
+  historySubtitle: { fontSize: 14, color: palette.gray500, marginBottom: 20 },
+
+  todayCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: palette.white,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 24,
+    borderWidth: 2,
+    borderColor: palette.primaryLight,
+    shadowColor: palette.primary,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  todayCardLeft: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  todayBadge: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: palette.primaryLight,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  todayBadgeDone: { backgroundColor: palette.successLight },
+  todayLabel: { fontSize: 16, fontWeight: '700', color: palette.gray800, marginBottom: 2 },
+  todayMeta: { fontSize: 12, color: palette.gray500, lineHeight: 18 },
+
+  historySection: { marginTop: 4 },
+  historySectionTitle: { fontSize: 16, fontWeight: '700', color: palette.gray700, marginBottom: 12 },
+
+  historyCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: palette.white,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: palette.gray100,
+  },
+  historyCardDate: {
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    backgroundColor: palette.gray50,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  historyCardDay: { fontSize: 18, fontWeight: '700', color: palette.gray800 },
+  historyCardMonth: { fontSize: 10, fontWeight: '600', color: palette.gray500, textTransform: 'uppercase' },
+  historyCardBody: { flex: 1 },
+  historyCardTitle: { fontSize: 14, fontWeight: '600', color: palette.gray700, marginBottom: 4 },
+  historyCardStats: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 2 },
+  historyStatBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: palette.primaryLight,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  historyStatText: { fontSize: 12, fontWeight: '600', color: palette.primary },
+  historyEnergyEmoji: { fontSize: 16 },
+  historyCardNote: { fontSize: 12, color: palette.gray400, marginTop: 2 },
+
+  emptyHistory: { alignItems: 'center', marginTop: 40, gap: 8 },
+  emptyHistoryText: { fontSize: 16, fontWeight: '600', color: palette.gray400 },
+  emptyHistorySubtext: { fontSize: 13, color: palette.gray400 },
+
+  // ─── View Mode ─────────────────────────────────────────────────────
+  viewHeader: {
+    backgroundColor: palette.white,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: palette.gray100,
+  },
+  viewBackBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, marginBottom: 8 },
+  viewBackText: { fontSize: 15, color: palette.primary, fontWeight: '600' },
+  viewDateTitle: { fontSize: 20, fontWeight: '700', color: palette.gray800 },
+
+  viewSection: {
+    backgroundColor: palette.white,
+    borderRadius: 14,
+    padding: 16,
+    marginBottom: 12,
+  },
+  viewSectionTitle: { fontSize: 16, fontWeight: '700', color: palette.gray800, marginBottom: 12 },
+  viewPhotoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  viewPhotoItem: { alignItems: 'center', width: '30%' },
+  viewPhotoThumb: { width: 80, height: 80, borderRadius: 12, marginBottom: 4 },
+  viewPhotoLabel: { fontSize: 11, color: palette.gray500, fontWeight: '500' },
+  viewAnalysisItem: {
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: palette.gray100,
+  },
+  viewAnalysisRegion: { fontSize: 13, fontWeight: '600', color: palette.gray600 },
+  viewSymptomItem: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
+  viewSymptomText: { fontSize: 14, color: palette.gray700 },
+  viewEmptyText: { fontSize: 14, color: palette.gray400, fontStyle: 'italic' },
+  viewNoteText: { fontSize: 14, color: palette.gray700, lineHeight: 22 },
+  viewSavedAt: { fontSize: 12, color: palette.gray400, textAlign: 'center', marginTop: 8 },
+
+  // ─── Wizard top bar ────────────────────────────────────────────────
+  wizardTopBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: palette.white,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: palette.gray100,
+  },
+  wizardBackBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, width: 70 },
+  wizardBackText: { fontSize: 14, color: palette.primary, fontWeight: '600' },
+  wizardTopTitle: { fontSize: 16, fontWeight: '700', color: palette.gray800 },
+
+  // ─── Progress Bar ──────────────────────────────────────────────────
   progressContainer: {
     flexDirection: 'row',
     paddingHorizontal: 24,
