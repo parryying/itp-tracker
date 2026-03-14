@@ -11,6 +11,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { palette } from '@/constants/Colors';
 import { interpretLabResults, LabInterpretation } from '@/services/azureOpenAIService';
+import ConnectLabsModal from '../connect-labs';
 
 const { width } = Dimensions.get('window');
 
@@ -231,6 +232,8 @@ export default function LabsScreen() {
   const [syncStatus, setSyncStatus] = React.useState<'synced' | 'syncing' | 'error'>('synced');
   const [aiInterpretation, setAiInterpretation] = React.useState<LabInterpretation | null>(null);
   const [aiLoading, setAiLoading] = React.useState(false);
+  const [connectModalVisible, setConnectModalVisible] = React.useState(false);
+  const [connectedProvider, setConnectedProvider] = React.useState<string | null>(null);
 
   const flagCount = MOCK_LABS[0].panels.reduce(
     (acc, panel) => acc + panel.items.filter((i) => i.status !== 'normal').length,
@@ -279,29 +282,42 @@ export default function LabsScreen() {
         <View style={styles.syncRow}>
           <View style={styles.syncIcon}>
             <Ionicons
-              name={syncStatus === 'synced' ? 'cloud-done' : 'cloud-upload'}
+              name={connectedProvider ? 'cloud-done' : 'cloud-offline'}
               size={20}
-              color={syncStatus === 'synced' ? palette.success : palette.primary}
+              color={connectedProvider ? palette.success : palette.gray400}
             />
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={styles.syncTitle}>MyChart Connected</Text>
-            <Text style={styles.syncSub}>Last synced: 2 hours ago</Text>
+            <Text style={styles.syncTitle}>
+              {connectedProvider ? `${connectedProvider} Connected` : 'Connect Lab Provider'}
+            </Text>
+            <Text style={styles.syncSub}>
+              {connectedProvider ? 'Last synced: 2 hours ago' : 'Import labs automatically'}
+            </Text>
           </View>
-          <TouchableOpacity
-            style={styles.syncBtn}
-            onPress={() => {
-              setSyncStatus('syncing');
-              setTimeout(() => setSyncStatus('synced'), 2000);
-            }}
-          >
-            <Ionicons
-              name="refresh"
-              size={16}
-              color={palette.primary}
-            />
-            <Text style={styles.syncBtnText}>Sync</Text>
-          </TouchableOpacity>
+          {connectedProvider ? (
+            <TouchableOpacity
+              style={styles.syncBtn}
+              onPress={() => {
+                setSyncStatus('syncing');
+                setTimeout(() => setSyncStatus('synced'), 2000);
+              }}
+            >
+              <Ionicons
+                name="refresh"
+                size={16}
+                color={palette.primary}
+              />
+              <Text style={styles.syncBtnText}>Sync</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              style={styles.connectBtn}
+              onPress={() => setConnectModalVisible(true)}
+            >
+              <Text style={styles.connectBtnText}>Connect</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
@@ -423,6 +439,15 @@ export default function LabsScreen() {
 
       <View style={{ height: 32 }} />
     </ScrollView>
+
+    <ConnectLabsModal
+      visible={connectModalVisible}
+      onClose={() => setConnectModalVisible(false)}
+      onConnected={(provider) => {
+        setConnectedProvider(provider.name);
+        setConnectModalVisible(false);
+      }}
+    />
   );
 }
 
@@ -463,6 +488,13 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   syncBtnText: { fontSize: 13, color: palette.primary, fontWeight: '600' },
+  connectBtn: {
+    backgroundColor: palette.primary,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  connectBtnText: { fontSize: 13, color: palette.white, fontWeight: '600' },
 
   aiCard: {
     backgroundColor: palette.purpleLight,
