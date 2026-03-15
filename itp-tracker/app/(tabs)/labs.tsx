@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useCallback } from 'react';
 import {
   ScrollView,
   StyleSheet,
@@ -11,6 +11,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { palette } from '@/constants/Colors';
 import { interpretLabResults, LabInterpretation } from '@/services/azureOpenAIService';
+import { HealthProviderService, FHIRLabSet } from '@/services/healthProviderService';
 import ConnectLabsModal from '../connect-labs';
 
 const { width } = Dimensions.get('window');
@@ -112,8 +113,8 @@ function getStatusBg(status: string) {
 }
 
 // Simple chart using Views
-function PlateletChart() {
-  const maxVal = 120;
+function PlateletChart({ data }: { data: { date: string; value: number }[] }) {
+  const maxVal = Math.max(120, ...data.map(d => d.value) ) + 10;
   const chartHeight = 180;
   const thresholds = [
     { value: 30, label: '30k (severe)', color: palette.critical },
@@ -145,7 +146,7 @@ function PlateletChart() {
 
       {/* Bars */}
       <View style={[styles.chartBars, { height: chartHeight }]}>
-        {PLATELET_HISTORY.map((point, i) => {
+        {data.map((point, i) => {
           const height = (point.value / maxVal) * chartHeight;
           const color =
             point.value < 30
@@ -155,7 +156,7 @@ function PlateletChart() {
               : point.value < 150
               ? palette.primary
               : palette.success;
-          const isLast = i === PLATELET_HISTORY.length - 1;
+          const isLast = i === data.length - 1;
           return (
             <View key={i} style={styles.chartBarCol}>
               <Text style={[styles.chartBarValue, { color }]}>
@@ -234,17 +235,53 @@ export default function LabsScreen() {
   const [aiLoading, setAiLoading] = React.useState(false);
   const [connectModalVisible, setConnectModalVisible] = React.useState(false);
   const [connectedProvider, setConnectedProvider] = React.useState<string | null>(null);
+  const [liveLabData, setLiveLabData] = React.useState<FHIRLabSet[] | null>(null);
+  const [labsLoading, setLabsLoading] = React.useState(false);
+  const [plateletHistory, setPlateletHistory] = React.useState<{ date: string; value: number }[]>(PLATELET_HISTORY);
 
-  const flagCount = MOCK_LABS[0].panels.reduce(
+  // Check for existing connection on mount
+  useEffect(() => {
+    (async () => {
+      const provider = await HealthProviderService.getConnectedProvider();
+      if (provider) {
+        setConnectedProvider(provider.name);
+        fetchLiveLabData();
+      }
+    })();
+  }, []);
+
+  const fetchLiveLabData = useCallback(async (forceRefresh = false) => {
+    setLabsLoading(true);
+    setSyncStatus('syncing');
+    try {
+      const [labs, platelets] = await Promise.all([
+        HealthProviderService.fetchLabResults(forceRefresh),
+        HealthProviderService.fetchPlateletHistory(),
+      ]);
+      if (labs.length > 0) setLiveLabData(labs);
+      if (platelets.length > 0) setPlateletHistory(platelets);
+      setSyncStatus('synced');
+    } catch (error) {
+      console.log('Lab fetch info:', (error as Error).message);
+      setSyncStatus('error');
+    } finally {
+      setLabsLoading(false);
+    }
+  }, []);
+
+  // Use live data if available, otherwise mock
+  const displayLabs = liveLabData || MOCK_LABS;
+
+  const flagCount = displayLabs[0]?.panels.reduce(
     (acc, panel) => acc + panel.items.filter((i) => i.status !== 'normal').length,
     0
-  );
+  ) || 0;
 
   const runAiInterpretation = async () => {
     setAiLoading(true);
     try {
-      // Flatten lab data for the AI
-      const allLabs = MOCK_LABS.map((labSet) => ({
+      // Use live data if available, otherwise mock
+      const allLabs = displayLabs.map((labSet) => ({
         date: labSet.date,
         panels: labSet.panels.map((p) => ({
           name: p.name,
@@ -276,6 +313,7 @@ export default function LabsScreen() {
   };
 
   return (
+    <>
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       {/* MyChart Sync Status */}
       <View style={styles.syncCard}>
@@ -298,17 +336,21 @@ export default function LabsScreen() {
           {connectedProvider ? (
             <TouchableOpacity
               style={styles.syncBtn}
-              onPress={() => {
-                setSyncStatus('syncing');
-                setTimeout(() => setSyncStatus('synced'), 2000);
-              }}
+              onPress={() => fetchLiveLabData(true)}
+              disabled={syncStatus === 'syncing'}
             >
-              <Ionicons
-                name="refresh"
-                size={16}
-                color={palette.primary}
-              />
-              <Text style={styles.syncBtnText}>Sync</Text>
+              {syncStatus === 'syncing' ? (
+                <ActivityIndicator size={14} color={palette.primary} />
+              ) : (
+                <Ionicons
+                  name="refresh"
+                  size={16}
+                  color={palette.primary}
+                />
+              )}
+              <Text style={styles.syncBtnText}>
+                {syncStatus === 'syncing' ? 'Syncing...' : 'Sync'}
+              </Text>
             </TouchableOpacity>
           ) : (
             <TouchableOpacity
@@ -383,10 +425,16 @@ export default function LabsScreen() {
       </TouchableOpacity>
 
       {/* Platelet Chart */}
-      <PlateletChart />
+      <PlateletChart data={plateletHistory} />
 
       {/* Lab Results by Date */}
-      {MOCK_LABS.map((labSet, labIdx) => (
+      {labsLoading && !liveLabData ? (
+        <View style={{ padding: 32, alignItems: 'center' }}>
+          <ActivityIndicator size="large" color={palette.primary} />
+          <Text style={{ marginTop: 12, color: palette.gray500 }}>Loading lab results...</Text>
+        </View>
+      ) : (
+      displayLabs.map((labSet, labIdx) => (
         <View key={labIdx}>
           <View style={styles.dateHeader}>
             <Text style={styles.dateText}>{labSet.date}</Text>
@@ -435,7 +483,8 @@ export default function LabsScreen() {
             );
           })}
         </View>
-      ))}
+      ))
+      )}
 
       <View style={{ height: 32 }} />
     </ScrollView>
@@ -446,8 +495,11 @@ export default function LabsScreen() {
       onConnected={(provider) => {
         setConnectedProvider(provider.name);
         setConnectModalVisible(false);
+        // Fetch labs after connecting
+        fetchLiveLabData();
       }}
     />
+    </>
   );
 }
 

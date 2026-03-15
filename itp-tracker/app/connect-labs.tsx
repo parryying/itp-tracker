@@ -7,6 +7,7 @@ import {
   Modal,
   ScrollView,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
@@ -22,11 +23,11 @@ interface ConnectLabsModalProps {
 export default function ConnectLabsModal({ visible, onClose, onConnected }: ConnectLabsModalProps) {
   const [selectedProvider, setSelectedProvider] = useState<HealthProvider | null>(null);
   const [authUrl, setAuthUrl] = useState<string | null>(null);
+  const [exchangingToken, setExchangingToken] = useState(false);
 
   const handleProviderSelect = (provider: HealthProvider) => {
     setSelectedProvider(provider);
-    // For Epic, use the client ID from env
-    const clientId = process.env.EXPO_PUBLIC_EPIC_CLIENT_ID || 'your-epic-client-id'; // Replace with actual client ID
+    const clientId = process.env.EXPO_PUBLIC_EPIC_CLIENT_ID || '';
     const state = Math.random().toString(36).substring(7);
     const url = HealthProviderService.generateAuthUrl(provider, clientId, state);
     setAuthUrl(url);
@@ -34,17 +35,28 @@ export default function ConnectLabsModal({ visible, onClose, onConnected }: Conn
 
   const handleWebViewNavigation = async (navState: any) => {
     const { url } = navState;
-    if (url.startsWith('itptracker://auth/callback')) {
-      // Handle the callback
+    if (url.startsWith('https://localhost/auth/callback')) {
       try {
         const result = await HealthProviderService.handleAuthCallback(url);
         if (result && selectedProvider) {
+          // Exchange auth code for access token
+          setExchangingToken(true);
+          const clientId = process.env.EXPO_PUBLIC_EPIC_CLIENT_ID || '';
+          await HealthProviderService.exchangeCodeForToken(
+            selectedProvider,
+            result.code,
+            clientId,
+          );
+          setExchangingToken(false);
+
           onConnected(selectedProvider);
           setSelectedProvider(null);
           setAuthUrl(null);
           onClose();
         }
       } catch (error) {
+        setExchangingToken(false);
+        console.error('Auth error:', error);
         Alert.alert('Authorization Error', (error as Error).message);
         setSelectedProvider(null);
         setAuthUrl(null);
@@ -86,12 +98,18 @@ export default function ConnectLabsModal({ visible, onClose, onConnected }: Conn
               </TouchableOpacity>
             ))}
           </ScrollView>
+        ) : exchangingToken ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color={palette.primary} />
+            <Text style={styles.loadingText}>Connecting to {selectedProvider?.name}...</Text>
+            <Text style={styles.loadingSubtext}>Fetching your lab results</Text>
+          </View>
         ) : (
           <WebView
             source={{ uri: authUrl }}
             onNavigationStateChange={handleWebViewNavigation}
             onShouldStartLoadWithRequest={(request) => {
-              if (request.url.startsWith('itptracker://auth/callback')) {
+              if (request.url.startsWith('https://localhost/auth/callback')) {
                 handleWebViewNavigation({ url: request.url });
                 return false;
               }
@@ -161,5 +179,22 @@ const styles = StyleSheet.create({
   },
   webview: {
     flex: 1,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 32,
+  },
+  loadingText: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: palette.gray900,
+    marginTop: 20,
+  },
+  loadingSubtext: {
+    fontSize: 14,
+    color: palette.gray500,
+    marginTop: 8,
   },
 });
