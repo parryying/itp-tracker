@@ -12,6 +12,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { palette } from '@/constants/Colors';
 import { interpretLabResults, LabInterpretation } from '@/services/azureOpenAIService';
 import { HealthProviderService, FHIRLabSet } from '@/services/healthProviderService';
+import { AppleHealthService } from '@/services/appleHealthService';
 import ConnectLabsModal from '../connect-labs';
 
 const { width } = Dimensions.get('window');
@@ -242,9 +243,16 @@ export default function LabsScreen() {
   // Check for existing connection on mount
   useEffect(() => {
     (async () => {
+      // Check FHIR provider
       const provider = await HealthProviderService.getConnectedProvider();
       if (provider) {
         setConnectedProvider(provider.name);
+        fetchLiveLabData();
+        return;
+      }
+      // Check Apple Health
+      if (AppleHealthService.isAvailable() && AppleHealthService.isInitialized()) {
+        setConnectedProvider('Apple Health');
         fetchLiveLabData();
       }
     })();
@@ -254,6 +262,18 @@ export default function LabsScreen() {
     setLabsLoading(true);
     setSyncStatus('syncing');
     try {
+      // Try Apple Health first if connected via that
+      if (connectedProvider === 'Apple Health' || AppleHealthService.isInitialized()) {
+        const healthKitLabs = await AppleHealthService.fetchLabResults();
+        if (healthKitLabs.length > 0) {
+          setLiveLabData(healthKitLabs as any);
+          setSyncStatus('synced');
+          setLabsLoading(false);
+          return;
+        }
+      }
+
+      // Otherwise try FHIR
       const [labs, platelets] = await Promise.all([
         HealthProviderService.fetchLabResults(forceRefresh),
         HealthProviderService.fetchPlateletHistory(),
@@ -267,7 +287,7 @@ export default function LabsScreen() {
     } finally {
       setLabsLoading(false);
     }
-  }, []);
+  }, [connectedProvider]);
 
   // Use live data if available, otherwise mock
   const displayLabs = liveLabData || MOCK_LABS;

@@ -17,6 +17,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { palette } from '@/constants/Colors';
 import { HealthProviderService, HealthProvider } from '@/services/healthProviderService';
 import { searchHospitals, HospitalEndpoint } from '@/services/hospitalDirectory';
+import { AppleHealthService } from '@/services/appleHealthService';
 
 type Step = 'search' | 'auth' | 'exchanging';
 
@@ -34,6 +35,42 @@ export default function ConnectLabsModal({ visible, onClose, onConnected }: Conn
 
   // Search results
   const hospitals = useMemo(() => searchHospitals(searchQuery), [searchQuery]);
+
+  const handleAppleHealthConnect = async () => {
+    if (!AppleHealthService.isAvailable()) {
+      Alert.alert(
+        'Apple Health',
+        'Apple Health is only available on iOS devices. Please use a physical iPhone to connect.',
+      );
+      return;
+    }
+
+    setStep('exchanging');
+    try {
+      const success = await AppleHealthService.initialize();
+      if (success) {
+        const provider: HealthProvider = {
+          id: 'apple-health',
+          name: 'Apple Health',
+          logo: '❤️',
+          description: 'Import labs from Apple Health',
+          authUrl: '',
+          tokenUrl: '',
+          fhirBaseUrl: '',
+          scopes: [],
+          redirectUri: '',
+        };
+        onConnected(provider);
+        resetAndClose();
+      } else {
+        Alert.alert('Permission Denied', 'Please allow access to Health data in Settings > Privacy > Health.');
+        setStep('search');
+      }
+    } catch (error) {
+      Alert.alert('Error', (error as Error).message);
+      setStep('search');
+    }
+  };
 
   const handleHospitalSelect = (hospital: HospitalEndpoint) => {
     setSelectedHospital(hospital);
@@ -154,6 +191,40 @@ export default function ConnectLabsModal({ visible, onClose, onConnected }: Conn
             </View>
 
             <ScrollView style={styles.hospitalList} keyboardShouldPersistTaps="handled">
+              {/* Apple Health — recommended option */}
+              {Platform.OS === 'ios' && (
+                <TouchableOpacity
+                  style={styles.appleHealthCard}
+                  onPress={handleAppleHealthConnect}
+                  activeOpacity={0.7}
+                >
+                  <View style={styles.appleHealthIcon}>
+                    <Text style={{ fontSize: 24 }}>❤️</Text>
+                  </View>
+                  <View style={styles.hospitalInfo}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                      <Text style={styles.hospitalName}>Apple Health</Text>
+                      <View style={styles.recommendedBadge}>
+                        <Text style={styles.recommendedText}>Recommended</Text>
+                      </View>
+                    </View>
+                    <Text style={styles.hospitalLocation}>
+                      Import labs from all your connected hospitals at once
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={20} color={palette.primary} />
+                </TouchableOpacity>
+              )}
+
+              {/* Divider */}
+              {Platform.OS === 'ios' && (
+                <View style={styles.dividerRow}>
+                  <View style={styles.dividerLine} />
+                  <Text style={styles.dividerText}>or connect directly</Text>
+                  <View style={styles.dividerLine} />
+                </View>
+              )}
+
               <Text style={styles.resultCount}>
                 {hospitals.length} hospital{hospitals.length !== 1 ? 's' : ''} found
               </Text>
@@ -335,6 +406,55 @@ const styles = StyleSheet.create({
   // WebView
   webview: {
     flex: 1,
+  },
+  // Apple Health
+  appleHealthCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 16,
+    backgroundColor: '#FFF0F3',
+    borderRadius: 14,
+    marginBottom: 16,
+    borderWidth: 2,
+    borderColor: '#FFB3C1',
+  },
+  appleHealthIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: '#FFE0E6',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  recommendedBadge: {
+    backgroundColor: palette.primary,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    marginLeft: 8,
+  },
+  recommendedText: {
+    color: palette.white,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  // Divider
+  dividerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: palette.gray200,
+  },
+  dividerText: {
+    fontSize: 12,
+    color: palette.gray400,
+    paddingHorizontal: 12,
+    fontWeight: '500',
   },
   // Loading
   loadingContainer: {

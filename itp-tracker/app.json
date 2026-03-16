@@ -13,7 +13,16 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.itp.tracker",
+      "infoPlist": {
+        "NSHealthShareUsageDescription": "ITP Tracker needs access to your Health data to import lab results like platelet counts, CBC, and metabolic panels from your connected hospitals.",
+        "NSHealthUpdateUsageDescription": "ITP Tracker does not write any data to Health."
+      },
+      "entitlements": {
+        "com.apple.developer.healthkit": true,
+        "com.apple.developer.healthkit.access": ["health-records"]
+      }
     },
     "android": {
       "adaptiveIcon": {
