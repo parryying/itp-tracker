@@ -13,7 +13,9 @@ import { palette } from '@/constants/Colors';
 import { interpretLabResults, LabInterpretation } from '@/services/azureOpenAIService';
 import { HealthProviderService, FHIRLabSet } from '@/services/healthProviderService';
 import { AppleHealthService } from '@/services/appleHealthService';
+import { MedicalDocumentService } from '@/services/medicalDocumentService';
 import ConnectLabsModal from '../connect-labs';
+import ScanDocumentModal from '../scan-document';
 
 const { width } = Dimensions.get('window');
 
@@ -235,14 +237,18 @@ export default function LabsScreen() {
   const [aiInterpretation, setAiInterpretation] = React.useState<LabInterpretation | null>(null);
   const [aiLoading, setAiLoading] = React.useState(false);
   const [connectModalVisible, setConnectModalVisible] = React.useState(false);
+  const [scanModalVisible, setScanModalVisible] = React.useState(false);
   const [connectedProvider, setConnectedProvider] = React.useState<string | null>(null);
   const [liveLabData, setLiveLabData] = React.useState<FHIRLabSet[] | null>(null);
   const [labsLoading, setLabsLoading] = React.useState(false);
   const [plateletHistory, setPlateletHistory] = React.useState<{ date: string; value: number }[]>(PLATELET_HISTORY);
 
-  // Check for existing connection on mount
+  // Check for existing connection on mount & load scanned docs
   useEffect(() => {
     (async () => {
+      // Load labs from scanned documents
+      await loadScannedLabs();
+
       // Check FHIR provider
       const provider = await HealthProviderService.getConnectedProvider();
       if (provider) {
@@ -257,6 +263,20 @@ export default function LabsScreen() {
       }
     })();
   }, []);
+
+  const loadScannedLabs = async () => {
+    try {
+      const { labSets, plateletHistory: plts } = await MedicalDocumentService.getLabHistory();
+      if (labSets.length > 0) {
+        setLiveLabData(labSets as any);
+      }
+      if (plts.length > 0) {
+        setPlateletHistory(plts);
+      }
+    } catch (e) {
+      console.log('No scanned labs yet');
+    }
+  };
 
   const fetchLiveLabData = useCallback(async (forceRefresh = false) => {
     setLabsLoading(true);
@@ -382,6 +402,22 @@ export default function LabsScreen() {
           )}
         </View>
       </View>
+
+      {/* Scan Document Button */}
+      <TouchableOpacity
+        style={styles.scanDocBtn}
+        onPress={() => setScanModalVisible(true)}
+        activeOpacity={0.7}
+      >
+        <View style={styles.scanDocIcon}>
+          <Ionicons name="document-text" size={20} color={palette.primary} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.scanDocTitle}>Upload Medical Document</Text>
+          <Text style={styles.scanDocSub}>Scan lab reports, doctor's notes, visit summaries</Text>
+        </View>
+        <Ionicons name="camera" size={20} color={palette.primary} />
+      </TouchableOpacity>
 
       {/* AI Interpretation Banner */}
       <TouchableOpacity
@@ -515,8 +551,16 @@ export default function LabsScreen() {
       onConnected={(provider) => {
         setConnectedProvider(provider.name);
         setConnectModalVisible(false);
-        // Fetch labs after connecting
         fetchLiveLabData();
+      }}
+    />
+    <ScanDocumentModal
+      visible={scanModalVisible}
+      onClose={() => setScanModalVisible(false)}
+      onDocumentProcessed={(result) => {
+        // Reload labs from scanned documents
+        loadScannedLabs();
+        setScanModalVisible(false);
       }}
     />
     </>
@@ -539,6 +583,30 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   syncRow: { flexDirection: 'row', alignItems: 'center' },
+
+  scanDocBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: palette.white,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1.5,
+    borderColor: palette.primary + '30',
+    borderStyle: 'dashed',
+  },
+  scanDocIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: palette.primaryLight,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  scanDocTitle: { fontSize: 14, fontWeight: '600', color: palette.gray900 },
+  scanDocSub: { fontSize: 12, color: palette.gray500, marginTop: 1 },
+
   syncIcon: {
     width: 40,
     height: 40,
